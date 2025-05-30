@@ -18,7 +18,10 @@ def visualize_all_methods(benchmark_results, output_dir):
         'CausalImpact': '#17becf',   # Cyan
         'Granger': '#bcbd22',        # Olive
         'DoubleML': '#7f7f7f',       # Gray
-        'meta_dml': '#e377c2'        # Pink
+        'meta_dml': '#e377c2',        # Pink
+        'CausalForests': '#9467bd',   # Purple
+        'BART': '#d62728',           # Red
+        'PSM': '#ff7f0e'             # Orange
     }
     
     # Create figure for each indicator
@@ -232,7 +235,10 @@ def visualize_calibration_comparison(calibration_results, output_dir='outputs/fi
         'CausalImpact': '#17becf',    # Cyan
         'Granger': '#bcbd22',         # Olive
         'DoubleML': '#7f7f7f',        # Gray
-        'meta_dml': '#e377c2'         # Pink
+        'meta_dml': '#e377c2',        # Pink
+        'CausalForests': '#9467bd',   # Purple
+        'BART': '#d62728',           # Red
+        'PSM': '#ff7f0e'             # Orange
     }
     
     # Extract methods and metrics

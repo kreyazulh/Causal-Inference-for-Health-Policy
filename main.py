@@ -16,8 +16,7 @@ from src.causal_inference import BayesianCausalImpactModel
 from src.causal_wavelet import CausalWaveletAnalysis
 from src.benchmarks import (
     ChangePointDetectionEvaluator, 
-    CausalInferenceEvaluator,
-    run_focused_benchmark
+    CausalInferenceEvaluator
 )
 
 # Global variable to store benchmark results
@@ -149,8 +148,10 @@ def run_enhanced_analysis():
         method_summary = []
         
         # UPDATED - Include Meta-DML in the method list
-        all_methods = ['BayesianCausal', 'ASCM', 'SCM', 'ITS', 'DiD', 'BWSC', 
-                      'CausalImpact', 'Granger', 'DoubleML', 'Meta-DML']
+        all_methods = ['ASCM', 'SCM', 'ITS', 'DiD', 
+                      'CausalImpact', 'CausalForests', 'BART', 'PSM', 'DoubleML', 'Meta-DML']
+        # all_methods = ['BayesianCausal', 'ASCM', 'SCM', 'ITS', 'DiD', 
+        #               'CausalImpact', 'CausalForests', 'BART', 'PSM', 'DoubleML', 'Meta-DML']
         
         for method in all_methods:
             if method in calibration_results:

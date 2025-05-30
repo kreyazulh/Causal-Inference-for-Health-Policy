@@ -680,10 +680,386 @@ class CausalInferenceEvaluator:
             }
         except Exception as e:
             return self._empty_result()
+        
+    def estimate_with_causal_forests(self, indicator: str, policy_year: int) -> Dict:
+        """Estimate causal impact using Causal Forests."""
+        try:
+            start_time = time.time()
+            
+            # Prepare data
+            years = np.array([int(y) for y in self.data.index])
+            treatment = (years >= policy_year).astype(int)
+            outcome = self.data[indicator].values
+            
+            # Create features (time trends, lagged values)
+            features = []
+            base_features = [
+                years - years.min(),  # Time trend
+                (years - years.min())**2,  # Quadratic trend
+            ]
+            
+            # Add lagged outcome if enough data
+            if len(outcome) > 2:
+                lag1 = np.concatenate([[outcome[0]], outcome[:-1]])
+                base_features.append(lag1)
+                
+            # Add control variables from other indicators
+            other_indicators = [col for col in self.data.columns if col != indicator][:3]
+            if other_indicators:
+                for other_ind in other_indicators:
+                    base_features.append(self.data[other_ind].values)
+            
+            X = np.column_stack(base_features)
+            
+            # Causal Forest implementation using Random Forest
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.model_selection import train_test_split
+            
+            # Split data for honest estimation
+            if len(X) < 20:
+                # Too small for splitting, use simple approach
+                forest = RandomForestRegressor(n_estimators=100, random_state=42)
+                
+                # Fit separate models for treated and control
+                treated_mask = treatment == 1
+                control_mask = treatment == 0
+                
+                if np.sum(treated_mask) > 3 and np.sum(control_mask) > 3:
+                    forest_treated = RandomForestRegressor(n_estimators=50, random_state=42)
+                    forest_control = RandomForestRegressor(n_estimators=50, random_state=42)
+                    
+                    forest_treated.fit(X[treated_mask], outcome[treated_mask])
+                    forest_control.fit(X[control_mask], outcome[control_mask])
+                    
+                    # Predict treatment effects
+                    mu1 = forest_treated.predict(X)
+                    mu0 = forest_control.predict(X)
+                    treatment_effects = mu1 - mu0
+                    
+                else:
+                    # Fallback to simple difference
+                    if np.sum(treated_mask) > 0 and np.sum(control_mask) > 0:
+                        treatment_effects = np.full(len(X), 
+                                                  np.mean(outcome[treated_mask]) - np.mean(outcome[control_mask]))
+                    else:
+                        return self._empty_result()
+            else:
+                # Honest splitting approach
+                X_train, X_test, y_train, y_test, t_train, t_test = train_test_split(
+                    X, outcome, treatment, test_size=0.5, random_state=42
+                )
+                
+                # Fit separate forests on training data
+                treated_train = t_train == 1
+                control_train = t_train == 0
+                
+                if np.sum(treated_train) > 2 and np.sum(control_train) > 2:
+                    forest_treated = RandomForestRegressor(n_estimators=100, random_state=42)
+                    forest_control = RandomForestRegressor(n_estimators=100, random_state=42)
+                    
+                    forest_treated.fit(X_train[treated_train], y_train[treated_train])
+                    forest_control.fit(X_train[control_train], y_train[control_train])
+                    
+                    # Predict on test set
+                    mu1_test = forest_treated.predict(X_test)
+                    mu0_test = forest_control.predict(X_test)
+                    treatment_effects = mu1_test - mu0_test
+                else:
+                    return self._empty_result()
+            
+            # Calculate average treatment effect
+            ate = np.mean(treatment_effects)
+            
+            # Calculate relative effect
+            baseline = np.mean(outcome[treatment == 0]) if np.sum(treatment == 0) > 0 else np.mean(outcome)
+            relative_effect = (ate / baseline) * 100 if baseline != 0 else 0
+            
+            # Bootstrap confidence intervals
+            n_bootstrap = 100
+            bootstrap_effects = []
+            
+            for _ in range(n_bootstrap):
+                # Bootstrap sample
+                idx = np.random.choice(len(treatment_effects), len(treatment_effects), replace=True)
+                boot_ate = np.mean(treatment_effects[idx])
+                boot_rel = (boot_ate / baseline) * 100 if baseline != 0 else 0
+                bootstrap_effects.append(boot_rel)
+            
+            ci_lower, ci_upper = np.percentile(bootstrap_effects, [2.5, 97.5])
+            significance = not (ci_lower <= 0 <= ci_upper)
+            
+            self.method_timings['CausalForests'] = time.time() - start_time
+            
+            return {
+                'point_effect': ate,
+                'relative_effect': relative_effect,
+                'lower_bound': ci_lower,
+                'upper_bound': ci_upper,
+                'significance': significance
+            }
+            
+        except Exception as e:
+            warnings.warn(f"Error with Causal Forests: {str(e)}")
+            return self._empty_result()
+
+    def estimate_with_bart(self, indicator: str, policy_year: int) -> Dict:
+        """Estimate causal impact using BART (Bayesian Additive Regression Trees)."""
+        try:
+            start_time = time.time()
+            
+            # Prepare data
+            years = np.array([int(y) for y in self.data.index])
+            treatment = (years >= policy_year).astype(int)
+            outcome = self.data[indicator].values
+            
+            # Create features
+            features = []
+            base_features = [
+                years - years.min(),  # Time trend
+                (years - years.min())**2,  # Quadratic trend
+            ]
+            
+            # Add lagged outcome
+            if len(outcome) > 2:
+                lag1 = np.concatenate([[outcome[0]], outcome[:-1]])
+                base_features.append(lag1)
+            
+            # Add other indicators as confounders
+            other_indicators = [col for col in self.data.columns if col != indicator][:2]
+            if other_indicators:
+                for other_ind in other_indicators:
+                    base_features.append(self.data[other_ind].values)
+            
+            X = np.column_stack(base_features)
+            
+            # Simplified BART implementation using ensemble of decision trees with Bayesian updates
+            from sklearn.tree import DecisionTreeRegressor
+            from sklearn.ensemble import BaggingRegressor
+            
+            # Bayesian ensemble approach (simplified BART)
+            n_trees = 50
+            trees = []
+            predictions = np.zeros((n_trees, len(outcome)))
+            
+            # Bootstrap aggregating with different random states (approximates BART sampling)
+            for i in range(n_trees):
+                # Create bootstrap sample
+                idx = np.random.choice(len(X), len(X), replace=True)
+                X_boot = X[idx]
+                y_boot = outcome[idx]
+                t_boot = treatment[idx]
+                
+                # Fit tree with regularization (mimics BART priors)
+                tree = DecisionTreeRegressor(
+                    max_depth=3,  # Shallow trees like BART
+                    min_samples_leaf=5,  # Regularization
+                    random_state=i
+                )
+                
+                # Include treatment in features
+                X_with_treatment = np.column_stack([X_boot, t_boot])
+                tree.fit(X_with_treatment, y_boot)
+                trees.append(tree)
+                
+                # Predict for all observations
+                X_all_with_treatment = np.column_stack([X, treatment])
+                predictions[i] = tree.predict(X_all_with_treatment)
+            
+            # BART posterior samples (average across trees)
+            posterior_mean = np.mean(predictions, axis=0)
+            
+            # Estimate treatment effects
+            # Predict with treatment = 1 for all
+            X_treated = np.column_stack([X, np.ones(len(X))])
+            # Predict with treatment = 0 for all  
+            X_control = np.column_stack([X, np.zeros(len(X))])
+            
+            treated_predictions = np.zeros((n_trees, len(X)))
+            control_predictions = np.zeros((n_trees, len(X)))
+            
+            for i, tree in enumerate(trees):
+                treated_predictions[i] = tree.predict(X_treated)
+                control_predictions[i] = tree.predict(X_control)
+            
+            # Treatment effects from posterior
+            treatment_effects = np.mean(treated_predictions - control_predictions, axis=0)
+            ate = np.mean(treatment_effects)
+            
+            # Calculate relative effect
+            baseline = np.mean(outcome[treatment == 0]) if np.sum(treatment == 0) > 0 else np.mean(outcome)
+            relative_effect = (ate / baseline) * 100 if baseline != 0 else 0
+            
+            # Posterior credible intervals
+            posterior_ates = np.mean(treated_predictions - control_predictions, axis=1)
+            posterior_rel_effects = (posterior_ates / baseline) * 100 if baseline != 0 else posterior_ates
+            
+            ci_lower, ci_upper = np.percentile(posterior_rel_effects, [2.5, 97.5])
+            significance = not (ci_lower <= 0 <= ci_upper)
+            
+            self.method_timings['BART'] = time.time() - start_time
+            
+            return {
+                'point_effect': ate,
+                'relative_effect': relative_effect,
+                'lower_bound': ci_lower,
+                'upper_bound': ci_upper,
+                'significance': significance
+            }
+            
+        except Exception as e:
+            warnings.warn(f"Error with BART: {str(e)}")
+            return self._empty_result()
+
+    def estimate_with_psm(self, indicator: str, policy_year: int) -> Dict:
+        """Estimate causal impact using Propensity Score Matching."""
+        try:
+            start_time = time.time()
+            
+            # Prepare data
+            years = np.array([int(y) for y in self.data.index])
+            treatment = (years >= policy_year).astype(int)
+            outcome = self.data[indicator].values
+            
+            # Check if we have both treated and control units
+            n_treated = np.sum(treatment)
+            n_control = np.sum(1 - treatment)
+            
+            if n_treated < 2 or n_control < 2:
+                print(f"PSM: Insufficient variation - {n_treated} treated, {n_control} control")
+                return self._empty_result()
+            
+            # Create covariates for propensity score (simplified for time series)
+            base_covariates = [
+                years - years.min(),  # Time trend
+                np.log(years - years.min() + 1),  # Log time trend
+            ]
+            
+            # Add lagged outcome if available
+            if len(outcome) > 2:
+                lag1 = np.concatenate([[outcome[0]], outcome[:-1]])
+                base_covariates.append(lag1)
+            
+            # Add one other indicator as confounder
+            other_indicators = [col for col in self.data.columns if col != indicator]
+            if other_indicators:
+                base_covariates.append(self.data[other_indicators[0]].values)
+            
+            X = np.column_stack(base_covariates)
+            
+            # Standardize features for better propensity score estimation
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            
+            # Step 1: Estimate propensity scores with regularization
+            from sklearn.linear_model import LogisticRegression
+            
+            ps_model = LogisticRegression(
+                random_state=42, 
+                max_iter=1000,
+                penalty='l2',
+                C=1.0  # Regularization
+            )
+            ps_model.fit(X_scaled, treatment)
+            propensity_scores = ps_model.predict_proba(X_scaled)[:, 1]
+            
+            # Check propensity score overlap
+            treated_ps = propensity_scores[treatment == 1]
+            control_ps = propensity_scores[treatment == 0]
+            
+            # Adaptive caliper based on data
+            ps_std = np.std(propensity_scores)
+            caliper = min(0.5, 0.25 * ps_std)  # More flexible caliper
+            
+            print(f"PSM: PS range treated [{treated_ps.min():.3f}, {treated_ps.max():.3f}], "
+                  f"control [{control_ps.min():.3f}, {control_ps.max():.3f}], caliper={caliper:.3f}")
+            
+            # Step 2: Greedy nearest neighbor matching with replacement
+            treated_indices = np.where(treatment == 1)[0]
+            control_indices = np.where(treatment == 0)[0]
+            
+            matched_pairs = []
+            used_controls = set()  # Track without replacement initially
+            
+            # Sort treated units by propensity score for better matching
+            treated_ps_sorted = sorted(zip(treated_indices, treated_ps), key=lambda x: x[1])
+            
+            for treated_idx, treated_ps_val in treated_ps_sorted:
+                # Find closest available control unit
+                available_controls = [idx for idx in control_indices if idx not in used_controls]
+                
+                if not available_controls:
+                    # Allow replacement if necessary
+                    available_controls = control_indices
+                
+                distances = np.abs(propensity_scores[available_controls] - treated_ps_val)
+                best_match_pos = np.argmin(distances)
+                closest_control_idx = available_controls[best_match_pos]
+                
+                # Accept match if within caliper OR if it's the best available
+                if distances[best_match_pos] < caliper or len(matched_pairs) < max(2, n_treated // 3):
+                    matched_pairs.append((treated_idx, closest_control_idx))
+                    used_controls.add(closest_control_idx)
+            
+            print(f"PSM: Found {len(matched_pairs)} matches out of {n_treated} treated units")
+            
+            if len(matched_pairs) < 2:
+                return self._empty_result()
+            
+            # Step 3: Calculate treatment effect on matched sample
+            treated_outcomes = outcome[[pair[0] for pair in matched_pairs]]
+            control_outcomes = outcome[[pair[1] for pair in matched_pairs]]
+            
+            # Average treatment effect on treated (ATT)
+            att = np.mean(treated_outcomes - control_outcomes)
+            
+            # Calculate relative effect
+            baseline = np.mean(control_outcomes)
+            relative_effect = (att / baseline) * 100 if baseline != 0 else 0
+            
+            # Bootstrap confidence intervals
+            n_bootstrap = 50  # Reduced for speed
+            bootstrap_effects = []
+            
+            for _ in range(n_bootstrap):
+                # Bootstrap matched pairs
+                boot_idx = np.random.choice(len(matched_pairs), len(matched_pairs), replace=True)
+                boot_treated = treated_outcomes[boot_idx]
+                boot_control = control_outcomes[boot_idx]
+                
+                boot_att = np.mean(boot_treated - boot_control)
+                boot_baseline = np.mean(boot_control)
+                boot_rel = (boot_att / boot_baseline) * 100 if boot_baseline != 0 else 0
+                bootstrap_effects.append(boot_rel)
+            
+            ci_lower, ci_upper = np.percentile(bootstrap_effects, [2.5, 97.5])
+            significance = not (ci_lower <= 0 <= ci_upper)
+            
+            # Calculate match quality
+            match_quality = np.mean([np.abs(propensity_scores[t] - propensity_scores[c]) 
+                                   for t, c in matched_pairs])
+            
+            self.method_timings['PSM'] = time.time() - start_time
+            
+            return {
+                'point_effect': att,
+                'relative_effect': relative_effect,
+                'lower_bound': ci_lower,
+                'upper_bound': ci_upper,
+                'significance': significance,
+                'n_matches': len(matched_pairs),
+                'match_quality': match_quality
+            }
+            
+        except Exception as e:
+            print(f"PSM Error for {indicator} at {policy_year}: {str(e)}")
+            warnings.warn(f"Error with PSM: {str(e)}")
+            return self._empty_result()
 
     def estimate_with_double_ml(self, indicator: str, policy_year: int) -> Dict:
         """Double Machine Learning for causal inference."""
         try:
+            start_time = time.time()
             from sklearn.ensemble import RandomForestRegressor
             from sklearn.model_selection import cross_val_predict
             
@@ -715,6 +1091,8 @@ class CausalInferenceEvaluator:
             
             baseline_mean = np.mean(outcome[treatment == 0])
             relative_effect = (treatment_effect / baseline_mean) * 100
+
+            self.method_timings['DoubleML'] = time.time() - start_time
             
             # Simple bootstrap CI
             n_bootstrap = 100
@@ -798,7 +1176,7 @@ class CausalInferenceEvaluator:
             )
             
             # Record timing
-            self.method_timings['meta_dml'] = time.time() - start_time
+            self.method_timings['Meta-DML'] = time.time() - start_time
             
             # Add some Meta-DML specific insights to results
             results['meta_insights'] = {
@@ -891,9 +1269,9 @@ class CausalInferenceEvaluator:
                     did_results = self.estimate_with_diff_in_diff(indicator, policy_year, control_indicators)
                     policy_results['DiD'] = did_results
                 
-                # Method 3: Bayesian Causal Model
-                bayesian_results = self.estimate_with_bayesian_causal_model(indicator, policy_year)
-                policy_results['BayesianCausal'] = bayesian_results
+                # Method 3: Bayesian Causal Model (final run er time e comment out)
+                # bayesian_results = self.estimate_with_bayesian_causal_model(indicator, policy_year)
+                # policy_results['BayesianCausal'] = bayesian_results
                 
                 # Method 4: Synthetic Control
                 scm_results = self.estimate_with_synthetic_control(indicator, policy_year)
@@ -903,17 +1281,23 @@ class CausalInferenceEvaluator:
                 ascm_results = self.estimate_with_augmented_scm(indicator, policy_year)
                 policy_results['ASCM'] = ascm_results
                 
-                # Method 6: Novel BayesianWaveletSyntheticControl
-                bwsc_results = self.estimate_with_bayesian_wavelet_synthetic(indicator, policy_year)
-                policy_results['BWSC'] = bwsc_results
 
                 # Method 7: CausalImpact
                 causal_impact_results = self.estimate_with_causal_impact(indicator, policy_year)
                 policy_results['CausalImpact'] = causal_impact_results
 
-                # Method 8: Granger Causality  
-                granger_results = self.estimate_with_granger_causality(indicator, policy_year)
-                policy_results['Granger'] = granger_results
+
+                # Method 9: Causal Forests
+                causal_forests_results = self.estimate_with_causal_forests(indicator, policy_year)
+                policy_results['CausalForests'] = causal_forests_results
+
+                # Method 10: BART
+                bart_results = self.estimate_with_bart(indicator, policy_year)
+                policy_results['BART'] = bart_results
+
+                # Method 11: PSM
+                psm_results = self.estimate_with_psm(indicator, policy_year)
+                policy_results['PSM'] = psm_results
 
                 # Method 9: Double ML
                 dml_results = self.estimate_with_double_ml(indicator, policy_year)
@@ -922,7 +1306,7 @@ class CausalInferenceEvaluator:
                                # Method 10: NEW - Meta-Learning Double ML
                 print(f"    Running Meta-DML...")
                 meta_dml_results = self.estimate_with_meta_dml(indicator, policy_year)
-                policy_results['meta_dml'] = meta_dml_results
+                policy_results['Meta-DML'] = meta_dml_results
                 print(f"    Meta-DML completed")
                 
                 # Store results for this policy
@@ -1017,467 +1401,3 @@ class CausalInferenceEvaluator:
         return calibration_scores
 
 
-# Standalone functions
-
-
-
-
-def run_focused_benchmark(df_timeseries, policy_timeline, indicators=None, policy_years=None, output_dir='outputs/benchmark/'):
-    """Run focused benchmark comparing methods for CIKM paper."""
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Select indicators if not provided
-    if indicators is None:
-        indicators = [
-            'Mortality rate, infant (per 1,000 live births)',
-            'Life expectancy at birth, total (years)',
-            'Maternal mortality ratio (modeled estimate, per 100,000 live births)',
-            'Immunization, measles (% of children ages 12-23 months)'
-        ]
-        indicators = [ind for ind in indicators if ind in df_timeseries.columns]
-    
-    # Select policy years if not provided
-    if policy_years is None:
-        policy_years = [1982, 1998, 2011]
-    
-    # 1. Focused change point detection benchmark
-    print("Running focused change point detection benchmark...")
-    cp_evaluator = ChangePointDetectionEvaluator(df_timeseries, policy_timeline)
-    
-    cp_alignment_results = {}
-    for indicator in indicators:
-        # Get BinSeg results (best baseline)
-        binseg_cps = cp_evaluator.detect_benchmark_methods(indicator, method_name='BinSeg')['BinSeg']
-        
-        # Get wavelet results
-        standard_cps, causal_cps = cp_evaluator.detect_with_causal_wavelet(indicator)
-        
-        # Measure policy alignment
-        alignment = cp_evaluator.measure_policy_alignment(standard_cps, causal_cps, policy_years)
-        
-        # Measure BinSeg vs CausalWavelet
-        binseg_vs_causal = cp_evaluator.measure_policy_alignment(binseg_cps, causal_cps, policy_years)
-        
-        cp_alignment_results[indicator] = {
-            'standard_vs_causal': alignment,
-            'binseg_vs_causal': binseg_vs_causal
-        }
-    
-    # 2. Focused causal inference benchmark
-    print("Running focused causal inference benchmark...")
-    ci_evaluator = CausalInferenceEvaluator(df_timeseries, policy_timeline)
-    
-    # Run comparative analysis
-    ci_results = ci_evaluator.run_comparative_analysis(indicators, policy_years)
-    
-    # Calculate calibration metrics
-    calibration_results = ci_evaluator.evaluate_calibration(ci_results)
-    
-    # Save calibration results
-    calibration_df = pd.DataFrame([
-        {
-            'Method': method,
-            'Plausibility_Rate': results['plausibility_rate'],
-            'Mean_Abs_Effect': results['mean_abs_effect'],
-            'Effect_Variance': results['effect_variance'],
-            'Max_Effect': results['max_effect'],
-            'Avg_Violation': results.get('avg_violation', 0)
-        }
-        for method, results in calibration_results.items()
-    ])
-    
-    calibration_df.to_csv(f'{output_dir}/calibration_results.csv', index=False)
-    
-    # Create focused results summary
-    focused_results = {
-        'cp_alignment': cp_alignment_results,
-        'calibration': calibration_results,
-        'ci_results': ci_results
-    }
-    
-    # Output key findings
-    print("\n--- Key Findings ---")
-    print(f"1. BayesianCausal has {calibration_results['BayesianCausal']['plausibility_rate']*100:.1f}% plausible estimates")
-    print(f"   vs. {calibration_results['ITS']['plausibility_rate']*100:.1f}% for ITS")
-    
-    # Calculate average alignment improvement
-    improvements = [
-        result['standard_vs_causal'].get('improvement_percentage', 0) 
-        for result in cp_alignment_results.values()
-        if result['standard_vs_causal'].get('improvement_percentage') is not None
-    ]
-    if improvements:
-        avg_improvement = np.mean(improvements)
-        print(f"2. CausalWavelet improves policy alignment by {avg_improvement:.1f}% on average")
-    
-    return focused_results
-
-
-# # REPLACE the generate_realistic_synthetic_data function with this improved version:
-
-# def generate_realistic_synthetic_data_v2(n_years=50, n_indicators=4, 
-#                                         policy_years=[10, 25, 35], 
-#                                         true_effects=[-15, 20, -10],
-#                                         random_seed=42) -> Tuple[pd.DataFrame, Dict, Dict]:
-#     """
-#     Generate MORE realistic synthetic health policy data that better matches real-world characteristics.
-    
-#     Key improvements:
-#     1. Complex autocorrelation patterns
-#     2. Multiple overlapping trends 
-#     3. Realistic noise structures
-#     4. Policy implementation delays
-#     5. Confounding seasonal effects
-#     6. Missing data patterns
-#     """
-#     np.random.seed(random_seed)
-#     years = np.arange(1970, 1970 + n_years)
-    
-#     indicators = [
-#         'Mortality rate, infant (per 1,000 live births)',
-#         'Life expectancy at birth, total (years)',
-#         'Maternal mortality ratio (modeled estimate, per 100,000 live births)',
-#         'Immunization, measles (% of children ages 12-23 months)'
-#     ]
-    
-#     # Create policy timeline
-#     policy_timeline = {}
-#     for i, policy_idx in enumerate(policy_years):
-#         if policy_idx < len(years):
-#             policy_timeline[str(years[policy_idx])] = f"Health_Policy_{i+1}"
-    
-#     synthetic_data = {}
-#     ground_truth = {}
-    
-#     # Add confounding donor pool indicators (like real data)
-#     donor_indicators = [
-#         'GDP per capita growth (annual %)',
-#         'Urban population (% of total population)', 
-#         'Education expenditure (% of GDP)',
-#         'Physicians (per 1,000 people)',
-#         'Access to electricity (% of population)',
-#         'Prevalence of wasting (% of children under 5)'
-#     ]
-    
-#     all_indicators = indicators[:n_indicators] + donor_indicators
-    
-#     for i, indicator in enumerate(all_indicators):
-#         is_mortality = 'mortality' in indicator.lower() or 'wasting' in indicator.lower()
-#         is_main_indicator = indicator in indicators[:n_indicators]
-        
-#         # 1. COMPLEX BASE TRENDS (multiple components)
-#         if is_mortality:
-#             # Mortality: exponential decay + linear trend + cyclical
-#             base_level = 150
-#             exponential_decay = base_level * np.exp(-0.03 * (years - 1970))
-#             linear_trend = -0.8 * (years - 1970) 
-#             cyclical = 5 * np.sin(0.2 * (years - 1970))  # 10-year cycles
-#             base_trend = exponential_decay + linear_trend + cyclical
-            
-#         elif 'life expectancy' in indicator.lower():
-#             # Life expectancy: logistic growth with saturation
-#             base_level = 45
-#             max_level = 80
-#             growth_rate = 0.08
-#             logistic_growth = max_level / (1 + np.exp(-growth_rate * (years - 1990)))
-#             base_trend = base_level + (logistic_growth - max_level/2)
-            
-#         elif 'gdp' in indicator.lower():
-#             # GDP: volatile with business cycles
-#             base_trend = 2 + 3 * np.sin(0.15 * (years - 1970)) + np.random.normal(0, 2, len(years))
-            
-#         elif 'urban' in indicator.lower():
-#             # Urban population: steady growth with saturation
-#             base_trend = 20 + 60 * (1 - np.exp(-0.04 * (years - 1970)))
-            
-#         else:
-#             # Other indicators: steady improvement with noise
-#             base_trend = 30 + 1.2 * (years - 1970) + 3 * np.sin(0.1 * (years - 1970))
-        
-#         # 2. COMPLEX AUTOCORRELATION STRUCTURE (AR(2) + MA(1))
-#         # This is crucial - real health data has strong autocorrelation
-#         noise = np.random.normal(0, 1, len(years))
-#         autocorr_noise = np.zeros(len(years))
-        
-#         for t in range(2, len(years)):
-#             # AR(2) + MA(1) process
-#             autocorr_noise[t] = (0.6 * autocorr_noise[t-1] + 
-#                                0.2 * autocorr_noise[t-2] + 
-#                                noise[t] + 0.3 * noise[t-1])
-        
-#         # Scale noise based on indicator type
-#         if is_mortality:
-#             noise_scale = 8  # Higher noise for mortality data
-#         else:
-#             noise_scale = 4
-            
-#         series = base_trend + noise_scale * autocorr_noise
-        
-#         # 3. REALISTIC POLICY EFFECTS (only for main indicators)
-#         if is_main_indicator:
-#             for j, policy_idx in enumerate(policy_years):
-#                 if j < len(true_effects) and policy_idx < len(years):
-#                     effect_size = true_effects[j]
-                    
-#                     # Adjust effect direction
-#                     if is_mortality:
-#                         effect_size = -abs(effect_size)
-#                     else:
-#                         effect_size = abs(effect_size)
-                    
-#                     # Store ground truth
-#                     policy_year = years[policy_idx]
-#                     ground_truth[f"{indicator}_{policy_year}"] = effect_size
-                    
-#                     # 4. REALISTIC POLICY IMPLEMENTATION (gradual + delay + diminishing returns)
-#                     implementation_delay = np.random.randint(0, 2)  # 0-1 year delay
-#                     implementation_years = 4  # Takes 4 years to fully implement
-                    
-#                     for k in range(implementation_years):
-#                         year_idx = policy_idx + implementation_delay + k
-#                         if year_idx < len(years):
-#                             # Diminishing returns: 50%, 30%, 15%, 5% of effect each year
-#                             yearly_weights = [0.5, 0.3, 0.15, 0.05]
-#                             yearly_effect = effect_size * yearly_weights[k]
-                            
-#                             # Apply to all subsequent years
-#                             series[year_idx:] += yearly_effect
-                            
-#                             # Add implementation noise
-#                             if k == 0:  # First year has most uncertainty
-#                                 impl_noise = np.random.normal(0, abs(yearly_effect) * 0.3)
-#                                 series[year_idx:] += impl_noise
-        
-#         # 4. ADD MISSING DATA PATTERNS (like real-world data)
-#         if np.random.random() < 0.1:  # 10% chance of missing data
-#             missing_years = np.random.choice(len(years), size=2, replace=False)
-#             for missing_idx in missing_years:
-#                 # Interpolate missing values (realistic data collection)
-#                 if missing_idx > 0 and missing_idx < len(years) - 1:
-#                     series[missing_idx] = (series[missing_idx-1] + series[missing_idx+1]) / 2
-        
-#         # 5. ENSURE REALISTIC BOUNDS
-#         if is_mortality:
-#             series = np.clip(series, 5, 200)  # Realistic mortality bounds
-#         elif 'life expectancy' in indicator.lower():
-#             series = np.clip(series, 35, 85)  # Realistic life expectancy bounds
-#         elif 'immunization' in indicator.lower():
-#             series = np.clip(series, 0, 100)  # Percentage bounds
-        
-#         synthetic_data[indicator] = series
-    
-#     # Convert to DataFrame
-#     df_synthetic = pd.DataFrame(synthetic_data, index=[str(year) for year in years])
-    
-#     # 6. ADD REALISTIC CORRELATIONS between indicators (crucial for donor pool methods)
-#     # Mortality should be negatively correlated with GDP, urban development
-#     correlation_matrix = np.corrcoef(df_synthetic.values.T)
-    
-#     # Adjust to make correlations more realistic
-#     for i, ind1 in enumerate(df_synthetic.columns):
-#         for j, ind2 in enumerate(df_synthetic.columns):
-#             if i != j:
-#                 # Mortality should correlate negatively with development indicators
-#                 if ('mortality' in ind1.lower() and 
-#                     ('gdp' in ind2.lower() or 'urban' in ind2.lower() or 'education' in ind2.lower())):
-#                     # Add negative correlation
-#                     df_synthetic.iloc[:, i] -= 0.3 * df_synthetic.iloc[:, j]
-    
-#     return df_synthetic, ground_truth, policy_timeline
-
-# # ALSO ADD this function to fix the evaluation metrics mismatch:
-
-# def evaluate_synthetic_with_real_metrics(results: Dict, synthetic_data: pd.DataFrame) -> Dict:
-#     """
-#     Evaluate synthetic results using the SAME metrics as real data analysis.
-#     This ensures consistent comparison.
-#     """
-#     # Use the same domain constraints as real data
-#     domain_constraints = {
-#         'Mortality rate, infant (per 1,000 live births)': (-90, 10),
-#         'Life expectancy at birth, total (years)': (-10, 30),
-#         'Maternal mortality ratio (modeled estimate, per 100,000 live births)': (-90, 10),
-#         'Immunization, measles (% of children ages 12-23 months)': (-20, 100)
-#     }
-    
-#     # Calculate plausibility rates (same as real data evaluation)
-#     method_plausibility = {}
-#     method_significance = {}
-    
-#     for indicator, indicator_results in results.items():
-#         if indicator in domain_constraints:
-#             min_val, max_val = domain_constraints[indicator]
-            
-#             for policy_year, policy_results in indicator_results.items():
-#                 for method, method_results in policy_results.items():
-#                     if method not in method_plausibility:
-#                         method_plausibility[method] = []
-#                         method_significance[method] = []
-                    
-#                     if isinstance(method_results, dict):
-#                         effect = method_results.get('relative_effect', np.nan)
-#                         significant = method_results.get('significance', False)
-                        
-#                         if not np.isnan(effect):
-#                             # Check plausibility
-#                             is_plausible = min_val <= effect <= max_val
-#                             method_plausibility[method].append(is_plausible)
-#                             method_significance[method].append(significant)
-    
-#     # Calculate final metrics (same as real data)
-#     consistency_results = {}
-    
-#     for method in method_plausibility:
-#         plausible_estimates = method_plausibility[method]
-#         significant_estimates = method_significance[method]
-        
-#         if len(plausible_estimates) > 0:
-#             plausibility_rate = np.mean(plausible_estimates)
-#             significance_rate = np.mean(significant_estimates)
-            
-#             consistency_results[method] = {
-#                 'plausibility_rate': plausibility_rate,
-#                 'significance_rate': significance_rate,
-#                 'total_estimates': len(plausible_estimates)
-#             }
-    
-#     return consistency_results
-
-# # UPDATE the run_synthetic_benchmark_test function to use both evaluations:
-
-# def run_synthetic_benchmark_test_v2(output_dir='outputs/synthetic_benchmark/'):
-#     """
-#     Run improved synthetic benchmark with consistent evaluation metrics.
-#     """
-#     print("=== RUNNING IMPROVED SYNTHETIC BENCHMARK TEST ===")
-    
-#     os.makedirs(output_dir, exist_ok=True)
-    
-#     # Use the improved synthetic data generation
-#     print("Generating realistic synthetic data...")
-#     df_synthetic, ground_truth, policy_timeline = generate_realistic_synthetic_data_v2(
-#         n_years=50, 
-#         n_indicators=4,
-#         policy_years=[2, 6, 12],  # Years 1972, 1976, 1982 
-#         true_effects=[-15, -20, -10],
-#         random_seed=42
-#     )
-    
-#     print("Ground Truth Effects:")
-#     for key, effect in ground_truth.items():
-#         print(f"  {key}: {effect:.1f}%")
-    
-#     # Run methods
-#     policy_years_int = [int(year) for year in policy_timeline.keys()]
-#     ci_evaluator = CausalInferenceEvaluator(df_synthetic, policy_timeline)
-    
-#     # Focus on main health indicators (not donor pool)
-#     main_indicators = [
-#         'Mortality rate, infant (per 1,000 live births)',
-#         'Life expectancy at birth, total (years)',
-#         'Maternal mortality ratio (modeled estimate, per 100,000 live births)',
-#         'Immunization, measles (% of children ages 12-23 months)'
-#     ]
-    
-#     benchmark_results = ci_evaluator.run_comparative_analysis(main_indicators, policy_years_int)
-    
-#     # DUAL EVALUATION: Both ground truth accuracy AND plausibility (like real data)
-    
-#     # 1. Ground truth accuracy (MAE)
-#     ground_truth_metrics = calculate_ground_truth_accuracy(benchmark_results, ground_truth)
-    
-#     # 2. Plausibility metrics (same as real data)
-#     plausibility_metrics = evaluate_synthetic_with_real_metrics(benchmark_results, df_synthetic)
-    
-#     # Print both sets of results
-#     print("\n=== GROUND TRUTH ACCURACY ===")
-#     print("Method          MAE     Success%")
-#     print("-" * 35)
-    
-#     for method, metrics in sorted(ground_truth_metrics.items(), key=lambda x: x[1]['mae']):
-#         mae = metrics['mae']
-#         success = metrics['success_rate']
-#         print(f"{method:<15} {mae:>6.1f}   {success:>6.1f}%")
-    
-#     print("\n=== PLAUSIBILITY ANALYSIS (Same as Real Data) ===")
-#     print("Method          Plausible%  Significant%")
-#     print("-" * 40)
-    
-#     for method, metrics in sorted(plausibility_metrics.items(), 
-#                                  key=lambda x: x[1]['plausibility_rate'], reverse=True):
-#         plaus = metrics['plausibility_rate'] * 100
-#         signif = metrics['significance_rate'] * 100
-#         print(f"{method:<15} {plaus:>9.1f}%   {signif:>10.1f}%")
-    
-#     # Save comprehensive results
-#     combined_results = {}
-#     for method in set(list(ground_truth_metrics.keys()) + list(plausibility_metrics.keys())):
-#         combined_results[method] = {
-#             'ground_truth_mae': ground_truth_metrics.get(method, {}).get('mae', np.nan),
-#             'ground_truth_success': ground_truth_metrics.get(method, {}).get('success_rate', 0),
-#             'plausibility_rate': plausibility_metrics.get(method, {}).get('plausibility_rate', np.nan),
-#             'significance_rate': plausibility_metrics.get(method, {}).get('significance_rate', np.nan)
-#         }
-    
-#     # Save to CSV
-#     results_df = pd.DataFrame(combined_results).T
-#     results_df.to_csv(os.path.join(output_dir, 'comprehensive_synthetic_results.csv'))
-    
-#     # Convert ground truth metrics to DataFrame with consistent column names
-#     accuracy_df = pd.DataFrame.from_dict(ground_truth_metrics, orient='index')
-#     accuracy_df = accuracy_df.rename(columns={
-#         'mae': 'MAE',
-#         'success_rate': 'Success_Rate',
-#         'num_estimates': 'Num_Estimates'
-#     })
-#     # Reset index to make method names a regular column
-#     accuracy_df = accuracy_df.reset_index().rename(columns={'index': 'Method'})
-    
-#     return {
-#         'ground_truth_metrics': ground_truth_metrics,
-#         'plausibility_metrics': plausibility_metrics,
-#         'synthetic_data': df_synthetic,
-#         'benchmark_results': benchmark_results,
-#         'accuracy_metrics': accuracy_df
-#     }
-
-# def calculate_ground_truth_accuracy(benchmark_results, ground_truth):
-#     """Calculate MAE against ground truth for each method."""
-#     method_estimates = {}
-    
-#     # Extract estimates
-#     for indicator, indicator_results in benchmark_results.items():
-#         for policy_year, policy_results in indicator_results.items():
-#             for method, method_results in policy_results.items():
-#                 if method not in method_estimates:
-#                     method_estimates[method] = {'estimates': [], 'true_values': []}
-                
-#                 key = f"{indicator}_{policy_year}"
-#                 if key in ground_truth:
-#                     if isinstance(method_results, dict):
-#                         effect = method_results.get('relative_effect', np.nan)
-#                         if not np.isnan(effect):
-#                             method_estimates[method]['estimates'].append(effect)
-#                             method_estimates[method]['true_values'].append(ground_truth[key])
-    
-#     # Calculate accuracy metrics
-#     accuracy_results = {}
-    
-#     for method, data in method_estimates.items():
-#         estimates = np.array(data['estimates'])
-#         true_vals = np.array(data['true_values'])
-        
-#         if len(estimates) > 0:
-#             errors = np.abs(estimates - true_vals)
-#             mae = np.mean(errors)
-#             success_count = np.sum(errors < 50)  # Within 50pp
-#             success_rate = success_count / len(errors) * 100
-            
-#             accuracy_results[method] = {
-#                 'mae': mae,
-#                 'success_rate': success_rate,
-#                 'num_estimates': len(estimates)
-#             }
-    
-#     return accuracy_results
