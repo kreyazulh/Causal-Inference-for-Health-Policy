@@ -8,8 +8,8 @@ import warnings
 # Suppress unnecessary warnings
 warnings.filterwarnings('ignore')
 
-def load_and_preprocess_data(file_path='data/health_bgd.csv'):
-    """Load and preprocess the Bangladesh health data"""
+def load_and_preprocess_data(file_path='data/health_zwe.csv'):
+    """Load and preprocess the health data for different countries"""
     print(f"Loading data from {file_path}...")
     
     # Load the dataset
@@ -22,14 +22,23 @@ def load_and_preprocess_data(file_path='data/health_bgd.csv'):
     df['Year'] = df['Year'].astype(str)
     df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
     
-    # Filter for Bangladesh data if needed
-    if 'Country Name' in df.columns:
-        bangladesh_data = df[df['Country Name'] == 'Bangladesh']
-        if len(bangladesh_data) > 0:
-            df = bangladesh_data
-            print(f"Bangladesh data shape: {df.shape}")
+    # Determine country from file path
+    country = None
+    if 'zwe' in file_path:
+        country = 'Zimbabwe'
+    elif 'phl' in file_path:
+        country = 'Philippines'
+    elif 'bgd' in file_path:
+        country = 'Bangladesh'
+    
+    # Filter for specific country data if needed
+    if 'Country Name' in df.columns and country:
+        country_data = df[df['Country Name'] == country]
+        if len(country_data) > 0:
+            df = country_data
+            print(f"{country} data shape: {df.shape}")
         else:
-            print("Warning: No data for Bangladesh found, using all data.")
+            print(f"Warning: No data for {country} found, using all data.")
     
     # Focus on post-independence period (1971 onwards)
     df_post = df[df['Year'].astype(int) >= 1971]

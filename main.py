@@ -21,16 +21,17 @@ from src.benchmarks import (
 
 # Global variable to store benchmark results
 benchmark_results = None
+all_country_results = {}
 
-def run_enhanced_analysis():
+def run_enhanced_analysis(data_path=None):
     """Run the enhanced analysis with additional causal methods."""
     global benchmark_results
-    print("Starting Enhanced Bangladesh Health Policy Analysis with Multiple Causal Methods...")
+    print("Starting Enhanced Health Policy Analysis with Multiple Causal Methods...")
     
     try:
         # Step 1: Load and preprocess data
         print("\n--- Step 1: Loading and preprocessing data ---")
-        df = load_and_preprocess_data('data/health_bgd.csv')
+        df = load_and_preprocess_data(data_path)
         
         key_indicators, coverage_info = select_key_indicators(
             df, 
@@ -53,16 +54,19 @@ def run_enhanced_analysis():
             'Incidence of tuberculosis (per 100,000 people)',
             'Hospital beds (per 1,000 people)',
         ]
-        # key_analysis_indicators = [
-        #     'Mortality rate, infant (per 1,000 live births)',
-        #     'Life expectancy at birth, total (years)',
-        #     'Maternal mortality ratio (modeled estimate, per 100,000 live births)',
-        #     'Mortality rate, neonatal (per 1,000 live births)',
-        # ]
         key_analysis_indicators = [ind for ind in key_analysis_indicators if ind in df_timeseries.columns]
-        
-        key_policies = ['1972', '1976', '1982', '1988', '1993', '1998', '2000', '2003', '2005', '2008', '2011', '2016', '2021']
-        #key_policies = ['1982', '1998', '2011']
+
+        # Determine country and policy years based on data path
+        if 'zwe' in data_path:
+            key_policies = ['1980', '1982', '1988', '1990', '1996', '1997', '2000', '2003', '2008', '2009', '2013', '2016', '2018', '2021', '2023']
+ 
+        elif 'phl' in data_path:
+            key_policies = ['1972', '1976', '1978', '1980', '1988', '1991', '1993', '1995', '1999', '2005', '2008', '2010', '2012', '2016', '2017', '2019', '2021']
+
+        else:  # Bangladesh
+            key_policies = ['1972', '1976', '1982', '1988', '1993', '1998', '2000', '2003', '2005', '2008', '2011', '2016', '2021']
+
+            
         policy_years_int = [int(year) for year in key_policies]
         
         print("\n--- Step 3: Running comprehensive benchmark with all causal methods (including Meta-DML) ---")
@@ -86,12 +90,7 @@ def run_enhanced_analysis():
         # Add calibration results to benchmark_results
         benchmark_results['calibration'] = calibration_results
         
-        # DEBUG: Print benchmark_results structure for inspection
-        import pprint
-        print("\n--- DEBUG: benchmark_results structure (now with Meta-DML) ---")
-        pprint.pprint({k: list(v.keys()) if isinstance(v, dict) else v for k, v in benchmark_results.items() if k != 'calibration'})
-        
-        # Save results as CSV for easy reference (now includes Meta-DML)
+        # Save results as CSV for easy reference
         methods_df = []
         
         for indicator in key_analysis_indicators:
@@ -132,26 +131,18 @@ def run_enhanced_analysis():
                         'Lower_Bound': lower_bound,
                         'Upper_Bound': upper_bound,
                         'Significant': significant,
-                        'Dominant_Learner': dominant_learner,  # Meta-DML specific
-                        'Weight_Entropy': weight_entropy,      # Meta-DML specific
-                        'N_Effective_Learners': n_effective_learners  # Meta-DML specific
+                        'Dominant_Learner': dominant_learner,
+                        'Weight_Entropy': weight_entropy,
+                        'N_Effective_Learners': n_effective_learners
                     })
         
         pd.DataFrame(methods_df).to_csv(f'{output_dir}/all_methods_results.csv', index=False)
         
-        # ... existing visualization code remains the same ...
-        
-        # Step 7: Updated final comparison table (now includes Meta-DML)
-        print("\n--- Step 7: Generating final comparison tables (with Meta-DML) ---")
-        
-        # Create summary table with all methods INCLUDING Meta-DML
+        # Create summary table with all methods
         method_summary = []
         
-        # UPDATED - Include Meta-DML in the method list
         all_methods = ['ASCM', 'SCM', 'ITS', 'DiD', 
                       'CausalImpact', 'CausalForests', 'BART', 'PSM', 'DoubleML', 'Meta-DML']
-        # all_methods = ['BayesianCausal', 'ASCM', 'SCM', 'ITS', 'DiD', 
-        #               'CausalImpact', 'CausalForests', 'BART', 'PSM', 'DoubleML', 'Meta-DML']
         
         for method in all_methods:
             if method in calibration_results:
@@ -167,219 +158,94 @@ def run_enhanced_analysis():
         
         pd.DataFrame(method_summary).to_csv(f'{output_dir}/method_comparison.csv', index=False)
         
-        # Print key findings INCLUDING Meta-DML performance
-        print("\n=== KEY FINDINGS (Including Meta-DML) ===")
-        
-        if 'Meta-DML' in calibration_results:
-            meta_dml_cal = calibration_results['Meta-DML']
-            print(f"🚀 Meta-DML Performance:")
-            print(f"   Plausibility Rate: {meta_dml_cal.get('plausibility_rate', 0)*100:.1f}%")
-            print(f"   Mean Absolute Effect: {meta_dml_cal.get('mean_abs_effect', 0):.1f}%")
-            print(f"   Effect Variance: {meta_dml_cal.get('effect_variance', 0):.1f}")
-            
-            # Compare with DoubleML baseline
-            if 'DoubleML' in calibration_results:
-                dml_cal = calibration_results['DoubleML']
-                dml_plaus = dml_cal.get('plausibility_rate', 0) * 100
-                meta_plaus = meta_dml_cal.get('plausibility_rate', 0) * 100
-                improvement = meta_plaus - dml_plaus
-                print(f"   Improvement over DoubleML: {improvement:+.1f} percentage points")
-                
-                if improvement > 0:
-                    print("   ✅ Meta-DML outperforms standard DoubleML!")
-                else:
-                    print("   ⚠️  Meta-DML needs further tuning")
-        
-        # Rank all methods by plausibility
-        method_rankings = sorted(
-            [(name, cal.get('plausibility_rate', 0)*100) 
-             for name, cal in calibration_results.items()],
-            key=lambda x: x[1], reverse=True
-        )
-        
-        print(f"\n📊 Method Rankings by Plausibility:")
-        for i, (method, plaus_rate) in enumerate(method_rankings[:5]):
-            rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
-            highlight = " 🚀" if method == "Meta-DML" else ""
-            print(f"   {rank_emoji} {method}: {plaus_rate:.1f}%{highlight}")
-        
-        print("\nEnhanced analysis complete with Meta-DML!")
-        print(f"Results saved to {output_dir}/")
+        return benchmark_results, method_summary, methods_df
         
     except Exception as e:
         print(f"Error in enhanced analysis: {str(e)}")
         import traceback
         traceback.print_exc()
-        return
+        return None, None, None
 
-# ADD this helper function for Meta-DML specific analysis
-def analyze_meta_dml_insights(benchmark_results, output_dir):
-    """Analyze Meta-DML specific insights like learner weights and adaptability."""
-    print("\n--- Analyzing Meta-DML Specific Insights ---")
+def print_comparative_results(all_country_results):
+    """Print comparative results across all countries"""
+    print("\n" + "="*80)
+    print("COMPARATIVE META-DML ANALYSIS ACROSS COUNTRIES")
+    print("="*80)
     
-    meta_dml_insights = []
-    
-    for indicator, indicator_results in benchmark_results.items():
-        if indicator == 'calibration':  # Skip calibration results
-            continue
+    for country, (benchmark_results, method_summary, methods_df) in all_country_results.items():
+        print(f"\n{'-'*40}")
+        print(f"Results for {country}")
+        print(f"{'-'*40}")
+        
+        if method_summary:
+            # Find Meta-DML results
+            meta_dml_results = next((m for m in method_summary if m['Method'] == 'Meta-DML'), None)
+            if meta_dml_results:
+                print("\nMeta-DML Performance:")
+                print(f"  Plausibility Rate: {meta_dml_results['Plausibility_Rate']:.1f}%")
+                print(f"  Mean Absolute Effect: {meta_dml_results['Mean_Abs_Effect']:.1f}%")
+                print(f"  Effect Variance: {meta_dml_results['Effect_Variance']:.1f}")
+                print(f"  Computation Time: {meta_dml_results['Computation_Time']:.1f}s")
             
-        for policy_year, policy_results in indicator_results.items():
-            if 'Meta-DML' in policy_results:
-                meta_results = policy_results['Meta-DML']
+            # Compare with DoubleML
+            dml_results = next((m for m in method_summary if m['Method'] == 'DoubleML'), None)
+            if meta_dml_results and dml_results:
+                improvement = meta_dml_results['Plausibility_Rate'] - dml_results['Plausibility_Rate']
+                print(f"\nImprovement over DoubleML: {improvement:+.1f} percentage points")
                 
-                if isinstance(meta_results, dict) and 'meta_insights' in meta_results:
-                    insights = meta_results['meta_insights']
-                    weights = meta_results.get('meta_weights', {})
-                    
-                    meta_dml_insights.append({
-                        'Indicator': indicator,
-                        'Policy_Year': policy_year,
-                        'Dominant_Learner': insights.get('dominant_learner', 'unknown'),
-                        'Weight_Entropy': insights.get('weight_entropy', np.nan),
-                        'N_Effective_Learners': insights.get('n_effective_learners', 0),
-                        'RF_Weight': weights.get('rf', 0),
-                        'GBM_Weight': weights.get('gbm', 0),
-                        'MLP_Weight': weights.get('mlp', 0),
-                        'Elastic_Weight': weights.get('elastic', 0),
-                        'Ridge_Weight': weights.get('ridge', 0),
-                        'Effect': meta_results.get('relative_effect', np.nan),
-                        'Significant': meta_results.get('significance', False)
-                    })
-    
-    if meta_dml_insights:
-        insights_df = pd.DataFrame(meta_dml_insights)
-        insights_df.to_csv(f'{output_dir}/meta_dml_insights.csv', index=False)
-        
-        # Print key insights
-        print("🔍 Meta-DML Insights:")
-        
-        # Most frequently dominant learner
-        dominant_counts = insights_df['Dominant_Learner'].value_counts()
-        if not dominant_counts.empty:
-            print(f"   Most dominant learner: {dominant_counts.index[0]} ({dominant_counts.iloc[0]} cases)")
-        
-        # Average weight entropy (higher = more diverse combination)
-        avg_entropy = insights_df['Weight_Entropy'].mean()
-        if not np.isnan(avg_entropy):
-            print(f"   Average weight entropy: {avg_entropy:.2f} (higher = more diverse)")
-        
-        # Adaptability across indicators
-        adaptability = insights_df.groupby('Indicator')['Dominant_Learner'].nunique().mean()
-        print(f"   Adaptability score: {adaptability:.1f} (learner diversity across contexts)")
-        
-        return insights_df
-    else:
-        print("   No Meta-DML insights found")
-        return None
-
-
-
-def run_synthetic_test():
-    """Run synthetic benchmark test to validate method performance against ground truth."""
-    print("=== SYNTHETIC BENCHMARK TEST ===")
-    print("Validating causal inference methods against known ground truth effects...")
-    
-    from src.benchmarks import run_synthetic_benchmark_test_v2
-    
-    try:
-        # Run the comprehensive synthetic benchmark
-        results = run_synthetic_benchmark_test_v2(output_dir='outputs/synthetic_benchmark/')
-        
-        print("\n=== SYNTHETIC TEST COMPLETED ===")
-        print("Key outputs generated:")
-        print("1. synthetic_benchmark_results.csv - All method estimates")
-        print("2. ground_truth_effects.csv - Known true effects")
-        print("3. accuracy_metrics.csv - Method accuracy comparison")
-        
-        # Print summary findings
-        accuracy_df = results['accuracy_metrics']
-        
-        if not accuracy_df.empty:
-            print("\n=== TOP PERFORMING METHODS ===")
-            
-            # Sort by MAE and show top 3
-            top_methods = accuracy_df.sort_values('MAE').head(3)
-            
-            for i, (_, row) in enumerate(top_methods.iterrows()):
-                rank = i + 1
-                method = row['Method']
-                mae = row['MAE']
-                success_rate = row['Success_Rate']
-                
-                if not np.isnan(mae):
-                    print(f"{rank}. {method}: MAE = {mae:.1f}pp, Success = {success_rate:.1f}%")
+                if improvement > 0:
+                    print("✅ Meta-DML outperforms standard DoubleML!")
                 else:
-                    print(f"{rank}. {method}: No valid estimates")
-            
-            # Special analysis for BWSC
-            bwsc_row = accuracy_df[accuracy_df['Method'] == 'BWSC']
-            if not bwsc_row.empty:
-                bwsc_mae = bwsc_row.iloc[0]['MAE']
-                bwsc_success = bwsc_row.iloc[0]['Success_Rate']
-                bwsc_rank = (accuracy_df.sort_values('MAE')['Method'] == 'BWSC').idxmax() + 1
-                
-                print(f"\n🎯 BWSC Performance:")
-                if not np.isnan(bwsc_mae):
-                    print(f"   Ranking: #{bwsc_rank} out of {len(accuracy_df)} methods")
-                    print(f"   Mean Absolute Error: {bwsc_mae:.1f} percentage points")
-                    print(f"   Success Rate: {bwsc_success:.1f}%")
-                    
-                    if bwsc_rank <= 3:
-                        print("   ✅ BWSC ranks in TOP 3 for ground truth recovery!")
-                    elif bwsc_rank <= len(accuracy_df) // 2:
-                        print("   ✅ BWSC ranks in TOP HALF for ground truth recovery")
-                    else:
-                        print("   ⚠️  BWSC has room for improvement in accuracy")
-                else:
-                    print("   ⚠️  BWSC failed to generate valid estimates")
+                    print("⚠️  Meta-DML needs further tuning")
         
-        print("\n📊 Use these results in your CIKM paper to demonstrate:")
-        print("1. Ground truth validation of method accuracy")
-        print("2. Quantitative comparison across all 9 methods")
-        print("3. Evidence for BWSC's specialized performance characteristics")
-        
-        return results
-        
-    except Exception as e:
-        print(f"Error in synthetic test: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-# ADD THIS TO THE main.py if __name__ == "__main__" block:
+        # Print top 3 methods by plausibility
+        if method_summary:
+            top_methods = sorted(method_summary, key=lambda x: x['Plausibility_Rate'], reverse=True)[:3]
+            print("\nTop 3 Methods by Plausibility:")
+            for i, method in enumerate(top_methods):
+                rank_emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉"
+                print(f"  {rank_emoji} {method['Method']}: {method['Plausibility_Rate']:.1f}%")
 
 if __name__ == "__main__":
-    import sys
+    datasets = {
+        'Zimbabwe': 'data/health_zwe.csv',
+        'Philippines': 'data/health_phl.csv',
+        'Bangladesh': 'data/health_bgd.csv'
+    }
     
-    if len(sys.argv) > 1 and sys.argv[1] == "synthetic":
-        # Run synthetic test
-        run_synthetic_test()
-    elif len(sys.argv) > 1 and sys.argv[1] == "real":
-        # Run with real data
-        run_enhanced_analysis()
-    elif len(sys.argv) > 1 and sys.argv[1] == "meta-analysis":
-        # NEW: Special analysis focusing on Meta-DML
-        print("Running Meta-DML focused analysis...")
-        run_enhanced_analysis()
+    for country, data_path in datasets.items():
+        print(f"\n{'='*50}")
+        print(f"Running Meta-DML Analysis for {country}")
+        print(f"{'='*50}")
         
-        # Additional Meta-DML specific analysis
         try:
-            from src.benchmarks import CausalInferenceEvaluator
-            # Load results and analyze Meta-DML insights
+            # Run the enhanced analysis with the current data path
+            benchmark_results, method_summary, methods_df = run_enhanced_analysis(data_path)
+            
+            # Store results for this country
             if benchmark_results is not None:
-                analyze_meta_dml_insights(benchmark_results, 'outputs/enhanced_benchmark/')
+                all_country_results[country] = (benchmark_results, method_summary, methods_df)
+                
+                # Save results in country-specific directory
+                output_dir = f'outputs/enhanced_benchmark_{country.lower()}/'
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Save detailed results
+                if method_summary:
+                    pd.DataFrame(method_summary).to_csv(f'{output_dir}/method_comparison.csv', index=False)
+                
+                # Save the detailed all_methods_results.csv for this specific country
+                if methods_df:
+                    pd.DataFrame(methods_df).to_csv(f'{output_dir}/all_methods_results.csv', index=False)
+                    print(f"Saved detailed results to {output_dir}/all_methods_results.csv")
             else:
-                print("No benchmark results available for Meta-DML analysis")
+                print(f"No benchmark results available for {country} Meta-DML analysis")
+                
         except Exception as e:
-            print(f"Could not run Meta-DML specific analysis: {str(e)}")
-    else:
-        # Default: ask user
-        choice = input("Run (1) Real data analysis, (2) Synthetic test, or (3) Meta-DML focused analysis? Enter 1, 2, or 3: ")
-        if choice == "2":
-            run_synthetic_test()
-        elif choice == "3":
-            print("Running Meta-DML focused analysis...")
-            run_enhanced_analysis()
-            analyze_meta_dml_insights(benchmark_results, 'outputs/enhanced_benchmark/')
-        else:
-            run_enhanced_analysis()
+            print(f"Error processing {country} dataset: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    # Print comparative results across all countries
+    print_comparative_results(all_country_results)
