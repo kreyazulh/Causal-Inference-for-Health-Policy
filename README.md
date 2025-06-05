@@ -15,16 +15,10 @@ pip install -r requirements.txt
 
 ## Usage
 
-Run tests:
-```powershell
-python test_meta_dml.py
-```
-
-If all tests pass, run main analysis:
+Run main analysis:
 ```powershell
 python main.py
 ```
-Press `3` when prompted.
 
 Generate visualizations:
 ```powershell
